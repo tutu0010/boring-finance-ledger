@@ -1,62 +1,68 @@
-use crate::command::CommandType;
+use crate::command::Command;
 use crate::errors::LedgerError;
 use crate::models::{Event, EventRecord};
 
 pub struct Ledger {
     events: Vec<EventRecord>,
+    next_id: u64,
     file_path: String,
 }
 
 impl Ledger {
     pub fn new(file_path: String, events: Vec<EventRecord>) -> Self {
-        Self { events, file_path }
+        let next_id = events.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+        Self {
+            events,
+            next_id,
+            file_path,
+        }
     }
 
     pub fn events(&self) -> &[EventRecord] {
         &self.events
     }
 
-    pub fn record(&mut self, cmd: CommandType) -> Result<(), LedgerError> {
+    pub fn record(&mut self, cmd: Command) -> Result<(), LedgerError> {
         let event = match cmd {
-            CommandType::Expense {
+            Command::Expense {
                 amount,
                 category,
                 description,
             } => Event::Expense {
                 amount,
                 category,
-                description,
+                description: crate::command::Command::description(&description),
             },
-            CommandType::Income {
+            Command::Income {
                 amount,
                 source,
                 description,
             } => Event::Income {
                 amount,
                 source,
-                description,
+                description: crate::command::Command::description(&description),
             },
-            CommandType::Lend {
+            Command::Lend {
                 amount,
                 person,
                 description,
             } => Event::LoanGiven {
                 amount,
                 person,
-                description,
+                description: crate::command::Command::description(&description),
             },
-            CommandType::Borrow {
+            Command::Borrow {
                 amount,
                 person,
                 description,
             } => Event::LoanTaken {
                 amount,
                 person,
-                description,
+                description: crate::command::Command::description(&description),
             },
-            CommandType::Repay { amount, person } => Event::RepaymentMade { amount, person },
-            CommandType::Receive { amount, person } => Event::RepaymentReceived { amount, person },
-            CommandType::Subscribe {
+            Command::Repay { amount, person } => Event::RepaymentMade { amount, person },
+            Command::Receive { amount, person } => Event::RepaymentReceived { amount, person },
+            Command::Subscribe {
                 amount,
                 service,
                 frequency,
@@ -65,11 +71,21 @@ impl Ledger {
                 service,
                 frequency,
             },
+            _ => return Err(LedgerError::Syntax("query passed to record".into())),
         };
 
-        self.events.push(EventRecord::new(event));
+        self.events.push(EventRecord::new(self.next_id, event));
+        self.next_id += 1;
         crate::storage::save(&self.file_path, &self.events)?;
         println!("Recorded successfully.");
+        Ok(())
+    }
+
+    pub fn undo(&mut self) -> Result<(), LedgerError> {
+        self.events.pop().ok_or(LedgerError::EmptyLedger)?;
+        self.next_id = self.events.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+        crate::storage::save(&self.file_path, &self.events)?;
+        println!("Last event removed.");
         Ok(())
     }
 }
