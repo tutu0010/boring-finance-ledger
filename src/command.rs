@@ -1,50 +1,73 @@
 use crate::errors::LedgerError;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use clap::{Parser, Subcommand, ValueEnum};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 
-#[derive(Debug)]
-pub enum Action {
-    Command(CommandType),
-    Query(QueryType),
+#[derive(Debug, Parser)]
+#[command(name = "ledger", version, about = "Personal Finance Ledger")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
 }
 
-#[derive(Debug)]
-pub enum CommandType {
+#[derive(Debug, Subcommand)]
+pub enum Command {
     Expense {
-        amount: f64,
+        amount: Decimal,
         category: String,
-        description: String,
+        #[arg(num_args = 1.., value_name = "DESCRIPTION")]
+        description: Vec<String>,
     },
     Income {
-        amount: f64,
+        amount: Decimal,
         source: String,
-        description: String,
+        #[arg(num_args = 1.., value_name = "DESCRIPTION")]
+        description: Vec<String>,
     },
     Lend {
-        amount: f64,
+        amount: Decimal,
         person: String,
-        description: String,
+        #[arg(num_args = 1.., value_name = "DESCRIPTION")]
+        description: Vec<String>,
     },
     Borrow {
-        amount: f64,
+        amount: Decimal,
         person: String,
-        description: String,
+        #[arg(num_args = 1.., value_name = "DESCRIPTION")]
+        description: Vec<String>,
     },
     Repay {
-        amount: f64,
+        amount: Decimal,
         person: String,
     },
     Receive {
-        amount: f64,
+        amount: Decimal,
         person: String,
     },
     Subscribe {
-        amount: f64,
+        amount: Decimal,
         service: String,
         frequency: String,
     },
+    History,
+    Summary {
+        start: Option<String>,
+        end: Option<String>,
+    },
+    Owed,
+    Debts,
+    List {
+        kind: ListKind,
+    },
+    Find {
+        #[arg(num_args = 1.., value_name = "TERM")]
+        term: Vec<String>,
+    },
+    Undo,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ListKind {
     Expenses,
     Income,
@@ -52,152 +75,76 @@ pub enum ListKind {
     Subscriptions,
 }
 
-#[derive(Debug)]
-pub enum QueryType {
-    History,
-    Summary {
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
-    },
-    Owed,
-    Debts,
-    List(ListKind),
-    Find(String),
-}
-
 fn parse_date_bound(s: &str, end: bool) -> Result<DateTime<Utc>, LedgerError> {
-    let date = match s.len() {
-        7 => NaiveDate::parse_from_str(&format!("{s}-01"), "%Y-%m-%d").map_err(|_| {
-            LedgerError::Parse(format!(
-                "Invalid date format (use YYYY-MM or YYYY-MM-DD): {}",
-                s
-            ))
-        })?,
-        10 => NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
-            LedgerError::Parse(format!(
-                "Invalid date format (use YYYY-MM or YYYY-MM-DD): {}",
-                s
-            ))
-        })?,
+    let base = match s.len() {
+        7 => NaiveDate::parse_from_str(&format!("{s}-01"), "%Y-%m-%d"),
+        10 => NaiveDate::parse_from_str(s, "%Y-%m-%d"),
         _ => {
             return Err(LedgerError::Parse(format!(
-                "Invalid date format (use YYYY-MM or YYYY-MM-DD): {}",
-                s
+                "use YYYY-MM or YYYY-MM-DD: {s}"
             )));
         }
-    };
+    }
+    .map_err(|_| LedgerError::Parse(format!("invalid date: {s}")))?;
 
-    let date = if end {
+    let target = if end {
         if s.len() == 7 {
-            let (y, m) = (date.year(), date.month());
+            let (y, m) = (base.year(), base.month());
             let (y, m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-            NaiveDate::from_ymd_opt(y, m, 1).ok_or_else(|| {
-                LedgerError::Parse(format!(
-                    "Invalid date format (use YYYY-MM or YYYY-MM-DD): {}",
-                    s
-                ))
-            })?
+            NaiveDate::from_ymd_opt(y, m, 1)
+                .ok_or_else(|| LedgerError::Parse(format!("invalid date: {s}")))?;
+            NaiveDate::from_ymd_opt(y, m, 1)
+                .ok_or_else(|| LedgerError::Parse(format!("invalid date: {s}")))?
         } else {
-            date.succ_opt().ok_or_else(|| {
-                LedgerError::Parse(format!(
-                    "Invalid date format (use YYYY-MM or YYYY-MM-DD): {}",
-                    s
-                ))
-            })?
+            base.succ_opt()
+                .ok_or_else(|| LedgerError::Parse(format!("invalid date: {s}")))?
         }
     } else {
-        date
+        base
     };
 
-    Ok(date.and_hms_opt(0, 0, 0).unwrap().and_utc())
+    Ok(target.and_hms_opt(0, 0, 0).unwrap().and_utc())
 }
 
-pub fn parse(args: &[String]) -> Result<Action, LedgerError> {
-    if args.is_empty() {
-        return Err(LedgerError::Syntax("No command provided".into()));
+impl Command {
+    pub fn summary_bounds(
+        &self,
+    ) -> Result<Option<(Option<DateTime<Utc>>, Option<DateTime<Utc>>)>, LedgerError> {
+        match self {
+            Self::Summary { start, end } => {
+                let start = start
+                    .as_deref()
+                    .map(|s| parse_date_bound(s, false))
+                    .transpose()?;
+                let end = end
+                    .as_deref()
+                    .map(|s| parse_date_bound(s, true))
+                    .transpose()?;
+                if let (Some(s), Some(e)) = (&start, &end) {
+                    if s >= e {
+                        return Err(LedgerError::Syntax(
+                            "summary start must be before end".into(),
+                        ));
+                    }
+                }
+                Ok(Some((start, end)))
+            }
+            _ => Ok(None),
+        }
     }
 
-    let cmd = args[0].as_str();
-    let parse_f64 = |s: &String| {
-        s.parse::<f64>()
-            .map_err(|_| LedgerError::Parse(format!("Invalid amount: {}", s)))
-    };
-
-    match cmd {
-        "expense" if args.len() >= 4 => Ok(Action::Command(CommandType::Expense {
-            amount: parse_f64(&args[1])?,
-            category: args[2].clone(),
-            description: args[3..].join(" "),
-        })),
-        "income" if args.len() >= 4 => Ok(Action::Command(CommandType::Income {
-            amount: parse_f64(&args[1])?,
-            source: args[2].clone(),
-            description: args[3..].join(" "),
-        })),
-        "lend" if args.len() >= 4 => Ok(Action::Command(CommandType::Lend {
-            amount: parse_f64(&args[1])?,
-            person: args[2].clone(),
-            description: args[3..].join(" "),
-        })),
-        "borrow" if args.len() >= 4 => Ok(Action::Command(CommandType::Borrow {
-            amount: parse_f64(&args[1])?,
-            person: args[2].clone(),
-            description: args[3..].join(" "),
-        })),
-        "repay" if args.len() == 3 => Ok(Action::Command(CommandType::Repay {
-            amount: parse_f64(&args[1])?,
-            person: args[2].clone(),
-        })),
-        "receive" if args.len() == 3 => Ok(Action::Command(CommandType::Receive {
-            amount: parse_f64(&args[1])?,
-            person: args[2].clone(),
-        })),
-        "subscribe" if args.len() == 4 => Ok(Action::Command(CommandType::Subscribe {
-            amount: parse_f64(&args[1])?,
-            service: args[2].clone(),
-            frequency: args[3].clone(),
-        })),
-
-        "history" => Ok(Action::Query(QueryType::History)),
-        "summary" if args.len() <= 3 => {
-            let start = args
-                .get(1)
-                .map(|s| parse_date_bound(s, false))
-                .transpose()?;
-            let end = args.get(2).map(|s| parse_date_bound(s, true)).transpose()?;
-
-            if let (Some(s), Some(e)) = (&start, &end) {
-                if s >= e {
-                    return Err(LedgerError::Syntax(
-                        "summary start must be before end".into(),
-                    ));
-                }
-            }
-
-            Ok(Action::Query(QueryType::Summary { start, end }))
+    pub fn find_term(&self) -> Option<String> {
+        match self {
+            Self::Find { term } => Some(term.join(" ")),
+            _ => None,
         }
-        "owed" => Ok(Action::Query(QueryType::Owed)),
-        "debts" => Ok(Action::Query(QueryType::Debts)),
-        "list" if args.len() == 2 => {
-            let kind = match args[1].to_lowercase().as_str() {
-                "expense" | "expenses" => ListKind::Expenses,
-                "income" => ListKind::Income,
-                "loan" | "loans" => ListKind::Loans,
-                "subscription" | "subscriptions" => ListKind::Subscriptions,
-                _ => {
-                    return Err(LedgerError::Parse(format!(
-                        "Unknown list kind: {}",
-                        args[1]
-                    )));
-                }
-            };
-            Ok(Action::Query(QueryType::List(kind)))
-        }
-        "find" if args.len() >= 2 => Ok(Action::Query(QueryType::Find(args[1..].join(" ")))),
+    }
 
-        _ => Err(LedgerError::Syntax(format!(
-            "Unknown or incomplete command: {}",
-            cmd
-        ))),
+    pub fn description(text: &[String]) -> String {
+        text.join(" ")
+    }
+
+    pub fn amount_from_str(s: &str) -> Result<Decimal, LedgerError> {
+        Decimal::from_str(s).map_err(|_| LedgerError::Parse(format!("invalid amount: {s}")))
     }
 }

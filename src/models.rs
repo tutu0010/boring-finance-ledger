@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRecord {
-    pub id: String,
+    pub id: u64,
     pub timestamp: DateTime<Utc>,
     pub event: Event,
 }
@@ -13,49 +14,52 @@ pub struct EventRecord {
 #[serde(tag = "type")]
 pub enum Event {
     Expense {
-        amount: f64,
+        amount: Decimal,
         category: String,
         description: String,
     },
     Income {
-        amount: f64,
+        amount: Decimal,
         source: String,
         description: String,
     },
     LoanGiven {
-        amount: f64,
+        amount: Decimal,
         person: String,
         description: String,
     },
     LoanTaken {
-        amount: f64,
+        amount: Decimal,
         person: String,
         description: String,
     },
     RepaymentReceived {
-        amount: f64,
+        amount: Decimal,
         person: String,
     },
     RepaymentMade {
-        amount: f64,
+        amount: Decimal,
         person: String,
     },
     SubscriptionCreated {
-        amount: f64,
+        amount: Decimal,
         service: String,
         frequency: String,
     },
 }
 
 impl EventRecord {
-    pub fn new(event: Event) -> Self {
-        let now = Utc::now();
+    pub fn new(id: u64, event: Event) -> Self {
         Self {
-            id: now.timestamp_nanos_opt().unwrap_or(0).to_string(),
-            timestamp: now,
+            id,
+            timestamp: Utc::now(),
             event,
         }
     }
+}
+
+fn fmt_amount(amount: Decimal) -> String {
+    format!("₹{amount:.2}")
 }
 
 impl fmt::Display for Event {
@@ -65,33 +69,78 @@ impl fmt::Display for Event {
                 amount,
                 category,
                 description,
-            } => write!(f, "Expense | ₹{amount:.2} | {category} | {description}"),
+            } => {
+                write!(
+                    f,
+                    "Expense | {} | {} | {}",
+                    fmt_amount(*amount),
+                    category,
+                    description
+                )
+            }
             Self::Income {
                 amount,
                 source,
                 description,
-            } => write!(f, "Income | ₹{amount:.2} | {source} | {description}"),
+            } => {
+                write!(
+                    f,
+                    "Income | {} | {} | {}",
+                    fmt_amount(*amount),
+                    source,
+                    description
+                )
+            }
             Self::LoanGiven {
                 amount,
                 person,
                 description,
-            } => write!(f, "Loan Given | ₹{amount:.2} | {person} | {description}"),
+            } => {
+                write!(
+                    f,
+                    "Loan Given | {} | {} | {}",
+                    fmt_amount(*amount),
+                    person,
+                    description
+                )
+            }
             Self::LoanTaken {
                 amount,
                 person,
                 description,
-            } => write!(f, "Loan Taken | ₹{amount:.2} | {person} | {description}"),
+            } => {
+                write!(
+                    f,
+                    "Loan Taken | {} | {} | {}",
+                    fmt_amount(*amount),
+                    person,
+                    description
+                )
+            }
             Self::RepaymentReceived { amount, person } => {
-                write!(f, "Repayment Received | ₹{amount:.2} | {person}")
+                write!(
+                    f,
+                    "Repayment Received | {} | {}",
+                    fmt_amount(*amount),
+                    person
+                )
             }
             Self::RepaymentMade { amount, person } => {
-                write!(f, "Repayment Made | ₹{amount:.2} | {person}")
+                write!(f, "Repayment Made | {} | {}", fmt_amount(*amount), person)
             }
             Self::SubscriptionCreated {
                 amount,
                 service,
                 frequency,
-            } => write!(f, "Subscription | ₹{amount:.2} | {service} | {frequency}"),
+            } => {
+                write!(
+                    f,
+                    "Subscription | {} | {} | {}",
+                    fmt_amount(*amount),
+                    service,
+                    frequency
+                )
+            }
         }
     }
 }
