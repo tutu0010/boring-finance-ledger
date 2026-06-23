@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 #[derive(Debug, Parser)]
-#[command(name = "ledger", version, about = "Personal Finance Ledger")]
+#[command(name = "ft", version, about = "Personal Finance Ledger")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
