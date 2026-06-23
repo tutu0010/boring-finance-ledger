@@ -1,0 +1,12 @@
+[
+  {
+    "id": "1782184326771739000",
+    "timestamp": "2026-06-23T03:12:06.771739Z",
+    "event": {
+      "type": "Income",
+      "amount": 1538.0,
+      "source": "bank",
+      "description": "balance"
+    }
+  }
+]
