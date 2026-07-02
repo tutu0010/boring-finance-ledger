@@ -1,8 +1,8 @@
-use crate::command::ListKind;
+use crate::command::{ListKind, Query};
 use crate::models::{Event, EventRecord};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Default, Debug)]
@@ -20,18 +20,22 @@ impl Summary {
 }
 
 fn abs(v: Decimal) -> Decimal {
-    if v.is_sign_negative() { -v } else { v }
+    if v.is_sign_negative() {
+        -v
+    } else {
+        v
+    }
 }
 
 fn fmt_map(f: &mut fmt::Formatter<'_>, title: &str, map: &HashMap<String, Decimal>) -> fmt::Result {
     if map.is_empty() {
         return Ok(());
     }
-    writeln!(f, "\n{}:", title)?;
+    writeln!(f, "\n{title}:")?;
     let mut items: Vec<_> = map.iter().collect();
     items.sort_by(|a, b| a.0.cmp(b.0));
     for (k, v) in items {
-        writeln!(f, "  {}: ₹{:.2}", k, v)?;
+        writeln!(f, "  {k}: ₹{v:.2}")?;
     }
     Ok(())
 }
@@ -48,48 +52,70 @@ impl fmt::Display for Summary {
     }
 }
 
-pub fn compute_summary<'a>(events: impl Iterator<Item = &'a EventRecord>) -> Summary {
-    events.fold(Summary::default(), |mut acc, record| {
-        match &record.event {
-            Event::Expense {
-                amount, category, ..
-            } => {
-                acc.total_expenses += *amount;
-                *acc.category_breakdown.entry(category.clone()).or_default() += *amount;
+/// IDs of events that a later `Reversed` marker points at. Every fold below
+/// skips these, plus the `Reversed` markers themselves, so undone events
+/// never contribute to totals but are never erased from the underlying log.
+fn reversed_ids<'a>(events: impl Iterator<Item = &'a EventRecord>) -> HashSet<u64> {
+    events
+        .filter_map(|r| match &r.event {
+            Event::Reversed { original_id, .. } => Some(*original_id),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn compute_summary<'a>(events: impl Iterator<Item = &'a EventRecord> + Clone) -> Summary {
+    let reversed = reversed_ids(events.clone());
+    events
+        .filter(|r| !reversed.contains(&r.id) && !matches!(r.event, Event::Reversed { .. }))
+        .fold(Summary::default(), |mut acc, record| {
+            match &record.event {
+                Event::Expense {
+                    amount, category, ..
+                } => {
+                    acc.total_expenses += amount.as_decimal();
+                    *acc.category_breakdown.entry(category.clone()).or_default() +=
+                        amount.as_decimal();
+                }
+                Event::Income { amount, .. } => acc.total_income += amount.as_decimal(),
+                Event::SubscriptionCharged {
+                    amount, service, ..
+                } => {
+                    acc.total_expenses += amount.as_decimal();
+                    *acc.category_breakdown.entry(service.clone()).or_default() +=
+                        amount.as_decimal();
+                    *acc.subscriptions.entry(service.clone()).or_default() += amount.as_decimal();
+                }
+                _ => {}
             }
-            Event::Income { amount, .. } => acc.total_income += *amount,
-            Event::SubscriptionCreated {
-                amount, service, ..
-            } => {
-                *acc.subscriptions.entry(service.clone()).or_default() += *amount;
-            }
-            _ => {}
-        }
-        acc
-    })
+            acc
+        })
 }
 
 pub fn compute_balances<'a>(
-    events: impl Iterator<Item = &'a EventRecord>,
+    events: impl Iterator<Item = &'a EventRecord> + Clone,
 ) -> HashMap<String, Decimal> {
-    events.fold(HashMap::new(), |mut acc, record| {
-        match &record.event {
-            Event::LoanGiven { amount, person, .. } => {
-                *acc.entry(person.clone()).or_default() += *amount
+    let reversed = reversed_ids(events.clone());
+    events
+        .filter(|r| !reversed.contains(&r.id))
+        .fold(HashMap::new(), |mut acc, record| {
+            match &record.event {
+                Event::LoanGiven { amount, person, .. } => {
+                    *acc.entry(person.clone()).or_default() += amount.as_decimal()
+                }
+                Event::RepaymentReceived { amount, person } => {
+                    *acc.entry(person.clone()).or_default() -= amount.as_decimal()
+                }
+                Event::LoanTaken { amount, person, .. } => {
+                    *acc.entry(person.clone()).or_default() -= amount.as_decimal()
+                }
+                Event::RepaymentMade { amount, person } => {
+                    *acc.entry(person.clone()).or_default() += amount.as_decimal()
+                }
+                _ => {}
             }
-            Event::RepaymentReceived { amount, person } => {
-                *acc.entry(person.clone()).or_default() -= *amount
-            }
-            Event::LoanTaken { amount, person, .. } => {
-                *acc.entry(person.clone()).or_default() -= *amount
-            }
-            Event::RepaymentMade { amount, person } => {
-                *acc.entry(person.clone()).or_default() += *amount
-            }
-            _ => {}
-        }
-        acc
-    })
+            acc
+        })
 }
 
 fn contains_ci(haystack: &str, needle: &str) -> bool {
@@ -104,7 +130,7 @@ fn matches_event(event: &Event, q: &str) -> bool {
             description,
         } => {
             contains_ci("expense", q)
-                || contains_ci(&amount.to_string(), q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
                 || contains_ci(category, q)
                 || contains_ci(description, q)
         }
@@ -114,7 +140,7 @@ fn matches_event(event: &Event, q: &str) -> bool {
             description,
         } => {
             contains_ci("income", q)
-                || contains_ci(&amount.to_string(), q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
                 || contains_ci(source, q)
                 || contains_ci(description, q)
         }
@@ -124,7 +150,7 @@ fn matches_event(event: &Event, q: &str) -> bool {
             description,
         } => {
             contains_ci("loan given", q)
-                || contains_ci(&amount.to_string(), q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
                 || contains_ci(person, q)
                 || contains_ci(description, q)
         }
@@ -134,18 +160,18 @@ fn matches_event(event: &Event, q: &str) -> bool {
             description,
         } => {
             contains_ci("loan taken", q)
-                || contains_ci(&amount.to_string(), q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
                 || contains_ci(person, q)
                 || contains_ci(description, q)
         }
         Event::RepaymentReceived { amount, person } => {
             contains_ci("repayment received", q)
-                || contains_ci(&amount.to_string(), q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
                 || contains_ci(person, q)
         }
         Event::RepaymentMade { amount, person } => {
             contains_ci("repayment made", q)
-                || contains_ci(&amount.to_string(), q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
                 || contains_ci(person, q)
         }
         Event::SubscriptionCreated {
@@ -154,9 +180,19 @@ fn matches_event(event: &Event, q: &str) -> bool {
             frequency,
         } => {
             contains_ci("subscription", q)
-                || contains_ci(&amount.to_string(), q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
                 || contains_ci(service, q)
                 || contains_ci(frequency, q)
+        }
+        Event::SubscriptionCharged {
+            amount, service, ..
+        } => {
+            contains_ci("subscription charge", q)
+                || contains_ci(&amount.as_decimal().to_string(), q)
+                || contains_ci(service, q)
+        }
+        Event::Reversed { reason, .. } => {
+            contains_ci("reversed", q) || reason.as_deref().is_some_and(|r| contains_ci(r, q))
         }
     }
 }
@@ -177,18 +213,28 @@ fn list_matches(kind: ListKind, event: &Event) -> bool {
             | (ListKind::Loans, Event::LoanGiven { .. })
             | (ListKind::Loans, Event::LoanTaken { .. })
             | (ListKind::Subscriptions, Event::SubscriptionCreated { .. })
+            | (ListKind::Subscriptions, Event::SubscriptionCharged { .. })
     )
 }
 
-pub fn execute(events: &[EventRecord], query: crate::command::Command) {
+pub fn execute(events: &[EventRecord], query: Query) {
     match query {
-        crate::command::Command::History => {
+        Query::History => {
+            let reversed = reversed_ids(events.iter());
             for record in events {
-                println!("{}", record);
+                if let Event::Reversed { .. } = record.event {
+                    println!("{record}");
+                    continue;
+                }
+                if reversed.contains(&record.id) {
+                    println!("{record}  [REVERSED]");
+                } else {
+                    println!("{record}");
+                }
             }
         }
-        crate::command::Command::Summary { .. } => unreachable!(),
-        crate::command::Command::Owed => {
+        Query::Summary { .. } => unreachable!("Summary is handled directly in main.rs"),
+        Query::Owed => {
             println!("--- People who owe you ---");
             let mut balances: Vec<_> = compute_balances(events.iter())
                 .into_iter()
@@ -196,10 +242,10 @@ pub fn execute(events: &[EventRecord], query: crate::command::Command) {
                 .collect();
             balances.sort_by(|a, b| a.0.cmp(&b.0));
             for (person, amt) in balances {
-                println!("{}: ₹{:.2}", person, amt);
+                println!("{person}: ₹{amt:.2}");
             }
         }
-        crate::command::Command::Debts => {
+        Query::Debts => {
             println!("--- Money you owe ---");
             let mut balances: Vec<_> = compute_balances(events.iter())
                 .into_iter()
@@ -207,25 +253,24 @@ pub fn execute(events: &[EventRecord], query: crate::command::Command) {
                 .collect();
             balances.sort_by(|a, b| a.0.cmp(&b.0));
             for (person, amt) in balances {
-                println!("{}: ₹{:.2}", person, abs(amt));
+                println!("{person}: ₹{:.2}", abs(amt));
             }
         }
-        crate::command::Command::List { kind } => {
+        Query::List { kind } => {
             println!("--- List ---");
             for record in events.iter().filter(|r| list_matches(kind, &r.event)) {
-                println!("{}", record);
+                println!("{record}");
             }
         }
-        crate::command::Command::Find { term } => {
-            let term = term.join(" ");
-            println!("--- Search Results for '{}' ---", term);
+        Query::Find { term } => {
+            println!("--- Search Results for '{term}' ---");
             let matches = find_events(events, &term);
             if matches.is_empty() {
                 println!("No matches found.");
                 return;
             }
             for r in &matches {
-                println!("{}", r);
+                println!("{r}");
             }
 
             let q = term.to_lowercase();
@@ -234,7 +279,7 @@ pub fn execute(events: &[EventRecord], query: crate::command::Command) {
                 .iter()
                 .find(|(person, _)| person.to_lowercase() == q)
             {
-                println!("\n--- Balance for '{}' ---", person);
+                println!("\n--- Balance for '{person}' ---");
                 println!(
                     "Current Balance: ₹{:.2} ({})",
                     abs(*bal),
@@ -247,22 +292,14 @@ pub fn execute(events: &[EventRecord], query: crate::command::Command) {
             }
 
             let net_flow = matches.iter().fold(Decimal::ZERO, |acc, r| match &r.event {
-                Event::Expense { amount, .. } | Event::SubscriptionCreated { amount, .. } => {
-                    acc - *amount
+                Event::Expense { amount, .. } | Event::SubscriptionCharged { amount, .. } => {
+                    acc - amount.as_decimal()
                 }
-                Event::Income { amount, .. } => acc + *amount,
+                Event::Income { amount, .. } => acc + amount.as_decimal(),
                 _ => acc,
             });
-            println!("Net Cash Impact: ₹{:.2}", net_flow);
+            println!("Net Cash Impact: ₹{net_flow:.2}");
         }
-        crate::command::Command::Expense { .. }
-        | crate::command::Command::Income { .. }
-        | crate::command::Command::Lend { .. }
-        | crate::command::Command::Borrow { .. }
-        | crate::command::Command::Repay { .. }
-        | crate::command::Command::Receive { .. }
-        | crate::command::Command::Subscribe { .. }
-        | crate::command::Command::Undo => unreachable!(),
     }
 }
 
@@ -281,8 +318,9 @@ pub fn filtered_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Event;
+    use crate::money::Money;
     use chrono::NaiveDate;
+    use rust_decimal::Decimal;
 
     fn rec(id: u64, event: Event) -> EventRecord {
         EventRecord {
@@ -296,13 +334,17 @@ mod tests {
         }
     }
 
+    fn money(cents: i64) -> Money {
+        Money::new(Decimal::new(cents, 2)).unwrap()
+    }
+
     #[test]
     fn test_compute_balances() {
         let events = vec![
             rec(
                 1,
                 Event::LoanGiven {
-                    amount: Decimal::new(5700, 2),
+                    amount: money(5700),
                     person: "Sinan".into(),
                     description: "lunch".into(),
                 },
@@ -310,14 +352,14 @@ mod tests {
             rec(
                 2,
                 Event::RepaymentReceived {
-                    amount: Decimal::new(2000, 2),
+                    amount: money(2000),
                     person: "Sinan".into(),
                 },
             ),
             rec(
                 3,
                 Event::LoanTaken {
-                    amount: Decimal::new(10000, 2),
+                    amount: money(10000),
                     person: "Abijith".into(),
                     description: "emergency".into(),
                 },
@@ -329,36 +371,67 @@ mod tests {
     }
 
     #[test]
-    fn test_summary() {
+    fn test_summary_with_subscription_charge() {
         let events = vec![
             rec(
                 1,
                 Event::Expense {
-                    amount: Decimal::new(20000, 2),
-                    category: "food".into(),
+                    amount: money(20000),
+                    category: "Food".into(),
                     description: "burger".into(),
                 },
             ),
             rec(
                 2,
                 Event::Income {
-                    amount: Decimal::new(50000, 2),
-                    source: "father".into(),
+                    amount: money(50000),
+                    source: "Father".into(),
                     description: "fees".into(),
                 },
             ),
             rec(
                 3,
                 Event::SubscriptionCreated {
-                    amount: Decimal::new(8990, 2),
-                    service: "spotify".into(),
+                    amount: money(8990),
+                    service: "Spotify".into(),
                     frequency: "monthly".into(),
+                },
+            ),
+            rec(
+                4,
+                Event::SubscriptionCharged {
+                    subscription_id: 3,
+                    amount: money(8990),
+                    service: "Spotify".into(),
                 },
             ),
         ];
         let s = compute_summary(events.iter());
-        assert_eq!(s.total_expenses, Decimal::new(20000, 2));
+        assert_eq!(s.total_expenses, Decimal::new(28990, 2));
         assert_eq!(s.total_income, Decimal::new(50000, 2));
-        assert_eq!(s.subscriptions.get("spotify"), Some(&Decimal::new(8990, 2)));
+        assert_eq!(s.subscriptions.get("Spotify"), Some(&Decimal::new(8990, 2)));
+    }
+
+    #[test]
+    fn reversed_event_excluded_from_summary() {
+        let events = vec![
+            rec(
+                1,
+                Event::Expense {
+                    amount: money(20000),
+                    category: "Food".into(),
+                    description: "burger".into(),
+                },
+            ),
+            rec(
+                2,
+                Event::Reversed {
+                    original_id: 1,
+                    reason: None,
+                },
+            ),
+        ];
+        let s = compute_summary(events.iter());
+        assert_eq!(s.total_expenses, Decimal::ZERO);
     }
 }
